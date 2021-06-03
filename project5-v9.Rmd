@@ -1,0 +1,1024 @@
+---
+title: "Project 5 - Dynamic Programming"
+author: "Jocelyne Walker, Justin Wagers, Jenny Robinson, Yue Tian"
+date: "05/01/2021"
+output: html_document
+---
+
+## Problem Overview
+
+Not only do airlines have to decide their optimal pricing decisions, they also have to decide how many tickets to sell. Airlines have a trade-off between revenue sales of tickets versus their overbooking costs. In this report, we utilize dynamic programming to consider these two decisions: (1) coach and first class ticket pricing and (2) amount of coach tickets to overbook. 
+
+```{r setup, include=FALSE}
+library(knitr)
+library(scales)
+library(dplyr)
+library(kableExtra)
+library(textshape)
+library(tibble)
+library(ggplot2)
+usd <- dollar_format(prefix = "$")
+```
+
+```{r define_variables, include=FALSE}
+## DEFINE ALL VARIABLES HERE
+
+#define coach
+priceL_coach = 300
+priceH_coach = 350
+pL_coach = c(0.35,0.65) # demand probabilities for low price
+pH_coach = c(0.7,0.3) # demand probabilities for high price
+
+# define first class
+priceL_first = 425
+priceH_first = 500
+pL_first = c(0.92,0.08) # demand probabilities for low price
+pH_first = c(0.96,0.04) # demand probabilities for high price
+
+delta = 1/(1+0.15/365) # discount rate
+
+M_coach=100 # number of seats in coach
+M_first=20 # number of seats in first class
+
+T_coach=105 # number of tickets sold in coach
+T_first=20 # number of tickets sold in first class
+
+T=365 # days until takeoff
+
+# prob of showing up
+p_show_coach = 0.95
+p_show_first = 0.97
+
+# overbooking cost
+c_1 = 50
+c_2 = 425
+
+min_overbook = 5
+max_overbook = 15
+```
+
+
+Assumptions and given information
+
+* Revenue comes in from demand for tickets in the time before takeoff
+
+* Overbooking cost is incurred on the day of takeoff 
+
+* Overbooking is not allowed in first class
+
+* If coach is overbooked and more ticket holders than seats show up, they can be first bumped to first class (if there are empty seats) at a cost of `r usd(c_1)` and second bumped off the plane at a cost of `r usd(c_2)`.
+
+* Demand for coach and first class seats is independent
+
+
+When selling in coach and first class, there are two possible pricing decisions, shown below. 
+
+```{r eda, echo=FALSE}
+# make table for pricing
+pricing = cbind(usd(c(priceL_coach,priceH_coach)), usd(c(priceL_first,priceH_first)))
+colnames(pricing) = c("Coach ","First Class ")
+row.names(pricing) = c("Low Price ","High Price ")
+kable(pricing, caption = "Pricing Decisions", align = 'c')
+```
+
+
+Given each pricing decision and class, the probability of purchase is shown below. 
+
+```{r eda2, echo=FALSE}
+# make table for purchase probability
+prob_purchase = cbind(c(pL_coach[2],pH_coach[2]), c(pL_first[2],pH_first[2]))
+colnames(prob_purchase) = c("Coach ","First Class ")
+row.names(prob_purchase) = c("Low Price ","High Price ")
+kable(prob_purchase, caption = "Probability of Purchase", align = 'c')
+```
+
+
+We have `r T` days until takeoff. We also have `r M_first` seats in first class and `r M_coach` seats in first class. This is shown in the diagram below. 
+
+```{r graph, echo=FALSE}
+options(knitr.kable.NA = '')
+options(knitr.table.format = "html")
+first = matrix(0, M_first/2,4)
+first[,1] = ''
+first[,4] = ''
+
+coach = matrix(0,M_coach/4,4)
+
+row_num = c(1:35)
+class = c(rep("First",M_first/2),rep("Coach",M_coach/4))
+seats = rbind(first,coach)
+colnames(seats) = c('A','B','C','D')
+seats = data.frame(cbind(row_num, seats, class))
+
+
+seats %>% 
+  kbl(format="html", booktabs = TRUE) %>%
+  column_spec(2:5,border_left = T, border_right = T) %>%
+  row_spec(1:(M_first/2), bold = T, color = "grey", background = "lightblue") %>%
+  row_spec(((M_first/2)+1):((M_first/2)+(M_coach/4)), bold = T, color = "grey", background = "lightgreen") %>%
+  kable_styling(full_width = F)
+```
+
+## First Iteration, Overselling by 5 Seats
+
+We first defined a function to calculate the expected terminal cost given the number of oversold tickets and the number of passengers showing up. 
+
+```{r calc_terminal_cost, include=TRUE}
+# Initialize sequences
+t_coach_Values = seq(0,T_coach) # all possible number of coach tickets left
+t_first_Values = seq(0,T_first) # all possible number of first class tickets left
+tValues = seq(0,T) # all possible days until takeoff
+
+t_coach_N=length(t_coach_Values) # count possible coach state values
+t_first_N=length(t_first_Values) # count possible first class state values
+tN=length(tValues)
+
+V=array(0,c(t_coach_N,t_first_N,tN)) # initialize value function 3d array
+
+
+V[,,tN]=0
+# calculating the terminal expected value (cost)
+for(seats.left.first in 0:T_first){
+  for(seats.left.coach in 0:T_coach){
+    this.cost = 0
+    for(show.up.first in 0:(T_first - seats.left.first)){
+      for(show.up.coach in 0:(T_coach - seats.left.coach)){
+        prob_first = dbinom(show.up.first,T_first - seats.left.first,p_show_first)
+        prob_coach = dbinom(show.up.coach,T_coach - seats.left.coach,p_show_coach)
+        
+        overbooked_coach = max(0,show.up.coach - M_coach)
+        extra_seats_in_first = M_first - show.up.first
+        coach_to_first = min(overbooked_coach, extra_seats_in_first)
+        coach_off_plane = max(0,overbooked_coach - coach_to_first)
+    
+        cost = c_1*coach_to_first + c_2*coach_off_plane
+        
+        this.cost = this.cost + prob_coach*prob_first*cost
+      }
+    }
+    V[seats.left.coach+1,seats.left.first+1,tN] = -1*this.cost
+  }
+}
+```
+
+We then created a dynamic program to make the optimal pricing decisions for selling coach and first class tickets with a coach tickets count of `r T_coach` seats.
+
+```{r iteration_1, include=TRUE}
+# Initialize sequences
+U_coach = V # initialize optimal choice variable for coach
+U_first = V # initialize optimal choice variable for first class
+
+U_coach[,,tN] = 0 # 0 is the value for no tickets for sale
+U_first[,,tN] = 0 # 0 is the value for no tickets for sale
+
+# Dynamic Programming Backwards Loop Through Time 
+for (t in (tN-1):1){
+  for (s_first in 1:t_first_N){
+    for (s_coach in 1:t_coach_N){
+      if(s_coach==1 && s_first==1){
+        V[s_coach,s_first,t]= 0 + delta*V[s_coach,s_first,t+1] # i - this references the terminal condition
+        U_first[s_coach,s_first,t]=0 # no first class tickets for sale
+        U_coach[s_coach,s_first,t]=0 # no coach tickets for sale
+      }else if(s_coach==1 && s_first!=1){
+        # can only sell first class
+        valueL_first = (priceL_first)*pL_first[2] + 
+                        delta* (pL_first[1]*V[s_coach,s_first,t+1] + 
+                                  pL_first[2]*V[s_coach,s_first-1,t+1])
+        valueH_first = (priceH_first)*pH_first[2] + 
+                        delta* (pH_first[1]*V[s_coach,s_first,t+1] + 
+                                  pH_first[2]*V[s_coach,s_first-1,t+1]) 
+        
+        V[s_coach,s_first,t]=max(c(valueL_first,valueH_first)) # value function maximizes expected revenue
+        U_coach[s_coach,s_first,t]=0
+        U_first[s_coach,s_first,t]=which.max(c(valueL_first,valueH_first)) # choice of price: 1 means low price, 2 means high price
+      }else if(s_coach!=1 && s_first==1){
+        # can only sell coach 
+        valueL_coach = (priceL_coach)*pL_coach[2] + 
+                        delta* (pL_coach[1]*V[s_coach,s_first,t+1] + 
+                                  pL_coach[2]*V[s_coach-1,s_first,t+1])
+        valueH_coach = (priceH_coach)*pH_coach[2] + 
+                        delta* (pH_coach[1]*V[s_coach,s_first,t+1] + 
+                                  pH_coach[2]*V[s_coach-1,s_first,t+1]) 
+        
+        V[s_coach,s_first,t]=max(c(valueL_coach,valueH_coach)) # value function maximizes expected revenue
+        U_coach[s_coach,s_first,t]=which.max(c(valueL_coach,valueH_coach)) # choice of price: 1 means low price, 2 means high price
+        U_first[s_coach,s_first,t]=0 
+      }else{
+        # Expected Values at Time t 
+        value_t_LcLf = (priceL_coach+priceL_first)*pL_coach[2]*pL_first[2]+ #sell both coach and FC
+                  (priceL_coach)*pL_coach[2]*pL_first[1]+ #sell only coach
+                  (priceL_first)*pL_coach[1]*pL_first[2]+ #sell only first
+                  0*pL_coach[1]*pL_first[1]
+        
+        value_t_LcHf = (priceL_coach+priceH_first)*pL_coach[2]*pH_first[2]+ #sell both coach and FC
+          (priceL_coach)*pL_coach[2]*pH_first[1]+ #sell only coach
+          (priceH_first)*pL_coach[1]*pH_first[2]+ #sell only first
+          0*pL_coach[1]*pH_first[1]
+        
+        value_t_HcLf = (priceH_coach+priceL_first)*pH_coach[2]*pL_first[2]+ #sell both coach and FC
+          (priceH_coach)*pH_coach[2]*pL_first[1]+ #sell only coach
+          (priceL_first)*pH_coach[1]*pL_first[2]+ #sell only first
+          0*pH_coach[1]*pL_first[1]
+        
+        value_t_HcHf = (priceH_coach+priceH_first)*pH_coach[2]*pH_first[2]+ #sell both coach and FC
+          (priceH_coach)*pH_coach[2]*pH_first[1]+ #sell only coach
+          (priceH_first)*pH_coach[1]*pH_first[2]+ #sell only first
+          0*pH_coach[1]*pH_first[1]
+
+        # value if you set both prices low
+        # expected revenue from low + low price + discounted expected value function next time
+        value_LcLf = value_t_LcLf + delta*(pL_coach[2]*pL_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                         pL_coach[2]*pL_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                         pL_coach[1]*pL_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                         pL_coach[1]*pL_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        # value if you set coach Low and first class High
+        # expected revenue from low + low price + discounted expected value function next time
+        value_LcHf = value_t_LcHf + delta*(pL_coach[2]*pH_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                   pL_coach[2]*pH_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                   pL_coach[1]*pH_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                   pL_coach[1]*pH_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        # value if you set coach High and first class Low
+        # expected revenue from low + low price + discounted expected value function next time
+        value_HcLf = value_t_HcLf + delta*(pH_coach[2]*pL_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                   pH_coach[2]*pL_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                   pH_coach[1]*pL_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                   pH_coach[1]*pL_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        # value if you set both prices High
+        # expected revenue from low + low price + discounted expected value function next time
+        value_HcHf = value_t_HcHf + delta*(pH_coach[2]*pH_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                   pH_coach[2]*pH_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                   pH_coach[1]*pH_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                   pH_coach[1]*pH_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        V[s_coach,s_first,t]=max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf)) # value function maximizes expected revenue
+
+        
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf))==1){
+          U_coach[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+        }
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf))==2){
+          U_coach[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+        }
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf))==3){
+          U_coach[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+        }
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf))==4){
+          U_coach[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+        }
+      }
+    }
+  }
+}
+```
+
+
+The expected discounted profit of selling these tickets and paying out overbooking costs over the course of the year is `r usd(V[t_coach_N,t_first_N,1])`. This includes the expected terminal cost of `r usd(V[1,1,tN])`.
+
+## Overselling by 5-15 seats
+
+We ran the loop of the dynamic program for each of these numbers of seats. 
+
+```{r terminal_loop, echo=FALSE}
+end_profits = matrix(NA,length(seq(min_overbook,max_overbook,1)),1)
+
+for (i in seq(min_overbook,max_overbook,1)){
+  T_coach = M_coach+i
+  
+  # Initialize sequences
+  t_coach_Values = seq(0,T_coach) # all possible number of coach tickets left
+  t_first_Values = seq(0,T_first) # all possible number of first class tickets left
+  tValues = seq(0,T) # all possible days until takeoff
+  
+  t_coach_N=length(t_coach_Values) # count possible coach state values
+  t_first_N=length(t_first_Values) # count possible first class state values
+  tN=length(tValues)
+  
+  V=array(0,c(t_coach_N,t_first_N,tN)) # initialize value function 3d array
+  
+  
+  V[,,tN]=0
+  # calculating the terminal expected value (cost)
+  for(seats.left.first in 0:T_first){
+    for(seats.left.coach in 0:T_coach){
+      this.cost = 0
+      for(show.up.first in 0:(T_first - seats.left.first)){
+        for(show.up.coach in 0:(T_coach - seats.left.coach)){
+          prob_first = dbinom(show.up.first,T_first - seats.left.first,p_show_first)
+          prob_coach = dbinom(show.up.coach,T_coach - seats.left.coach,p_show_coach)
+          
+          overbooked_coach = max(0,show.up.coach - M_coach)
+          extra_seats_in_first = M_first - show.up.first
+          coach_to_first = min(overbooked_coach, extra_seats_in_first)
+          coach_off_plane = max(0,overbooked_coach - coach_to_first)
+      
+          cost = c_1*coach_to_first + c_2*coach_off_plane
+          
+          this.cost = this.cost + cost*prob_coach*prob_first
+        }
+      }
+      V[seats.left.coach+1,seats.left.first+1,tN] = -1*this.cost
+    }
+  }
+  
+  # Initialize sequences
+  U_coach = V # initialize optimal choice variable for coach
+  U_first = V # initialize optimal choice variable for first class
+  
+  
+  U_coach[,,tN] = 0 # 0 is the value for no tickets for sale
+  U_first[,,tN] = 0 # 0 is the value for no tickets for sale
+  
+  # Dynamic Programming Backwards Loop Through Time 
+  for (t in (tN-1):1){
+    for (s_first in 1:t_first_N){
+      for (s_coach in 1:t_coach_N){
+        if(s_coach==1 && s_first==1){
+          V[s_coach,s_first,t]= 0 + delta*V[s_coach,s_first,t+1] # i - this references the terminal condition!!
+          U_first[s_coach,s_first,t]=0 # no first class tickets for sale
+          U_coach[s_coach,s_first,t]=0 # no coach tickets for sale
+          
+        }else if(s_coach==1 && s_first!=1){
+          # can only sell first class
+          valueL_first = (priceL_first)*pL_first[2] + 
+                          delta* (pL_first[1]*V[s_coach,s_first,t+1] + 
+                                    pL_first[2]*V[s_coach,s_first-1,t+1])
+          valueH_first = (priceH_first)*pH_first[2] + 
+                          delta* (pH_first[1]*V[s_coach,s_first,t+1] + 
+                                    pH_first[2]*V[s_coach,s_first-1,t+1]) 
+          
+          V[s_coach,s_first,t]=max(c(valueL_first,valueH_first)) # value function maximizes expected revenue
+          U_coach[s_coach,s_first,t]=0
+          U_first[s_coach,s_first,t]=which.max(c(valueL_first,valueH_first)) # choice of price: 1 means low price, 2 means high price
+  
+        }else if(s_coach!=1 && s_first==1){
+          # can only sell coach 
+          valueL_coach = (priceL_coach)*pL_coach[2] + 
+                          delta* (pL_coach[1]*V[s_coach,s_first,t+1] + 
+                                    pL_coach[2]*V[s_coach-1,s_first,t+1])
+          valueH_coach = (priceH_coach)*pH_coach[2] + 
+                          delta* (pH_coach[1]*V[s_coach,s_first,t+1] + 
+                                    pH_coach[2]*V[s_coach-1,s_first,t+1]) 
+          
+          V[s_coach,s_first,t]=max(c(valueL_coach,valueH_coach)) # value function maximizes expected revenue
+          U_coach[s_coach,s_first,t]=which.max(c(valueL_coach,valueH_coach)) # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=0 
+        }else{
+          # Expected Values at Time t 
+          value_t_LcLf = (priceL_coach+priceL_first)*pL_coach[2]*pL_first[2]+ #sell both coach and FC
+                    (priceL_coach)*pL_coach[2]*pL_first[1]+ #sell only coach
+                    (priceL_first)*pL_coach[1]*pL_first[2]+ #sell only first
+                    0*pL_coach[1]*pL_first[1]
+          
+          value_t_LcHf = (priceL_coach+priceH_first)*pL_coach[2]*pH_first[2]+ #sell both coach and FC
+            (priceL_coach)*pL_coach[2]*pH_first[1]+ #sell only coach
+            (priceH_first)*pL_coach[1]*pH_first[2]+ #sell only first
+            0*pL_coach[1]*pH_first[1]
+          
+          value_t_HcLf = (priceH_coach+priceL_first)*pH_coach[2]*pL_first[2]+ #sell both coach and FC
+            (priceH_coach)*pH_coach[2]*pL_first[1]+ #sell only coach
+            (priceL_first)*pH_coach[1]*pL_first[2]+ #sell only first
+            0*pH_coach[1]*pL_first[1]
+          
+          value_t_HcHf = (priceH_coach+priceH_first)*pH_coach[2]*pH_first[2]+ #sell both coach and FC
+            (priceH_coach)*pH_coach[2]*pH_first[1]+ #sell only coach
+            (priceH_first)*pH_coach[1]*pH_first[2]+ #sell only first
+            0*pH_coach[1]*pH_first[1]
+  
+          # value if you set both prices low
+          # expected revenue from low + low price + discounted expected value function next time
+          value_LcLf = value_t_LcLf + delta*(pL_coach[2]*pL_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                           pL_coach[2]*pL_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                           pL_coach[1]*pL_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                           pL_coach[1]*pL_first[1]*V[s_coach,s_first,t+1]) #sell none
+          
+          # value if you set coach Low and first class High
+          # expected revenue from low + low price + discounted expected value function next time
+          value_LcHf = value_t_LcHf + delta*(pL_coach[2]*pH_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                     pL_coach[2]*pH_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                     pL_coach[1]*pH_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                     pL_coach[1]*pH_first[1]*V[s_coach,s_first,t+1]) #sell none
+          
+          # value if you set coach High and first class Low
+          # expected revenue from low + low price + discounted expected value function next time
+          value_HcLf = value_t_HcLf + delta*(pH_coach[2]*pL_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                     pH_coach[2]*pL_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                     pH_coach[1]*pL_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                     pH_coach[1]*pL_first[1]*V[s_coach,s_first,t+1]) #sell none
+          
+          # value if you set both prices High
+          # expected revenue from low + low price + discounted expected value function next time
+          value_HcHf = value_t_HcHf + delta*(pH_coach[2]*pH_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                     pH_coach[2]*pH_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                     pH_coach[1]*pH_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                     pH_coach[1]*pH_first[1]*V[s_coach,s_first,t+1]) #sell none
+          
+          V[s_coach,s_first,t]=max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf)) # value function maximizes expected revenue
+  
+          
+          if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf))==1){
+            U_coach[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+            U_first[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+          }
+          if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf))==2){
+            U_coach[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+            U_first[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+          }
+          if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf))==3){
+            U_coach[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+            U_first[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+          }
+          if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf))==4){
+            U_coach[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+            U_first[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+          }
+        }
+      }
+    }
+  }
+  
+  end_profits[i-4] = V[M_coach+i+1,T_first+1,1]
+}
+
+end_profits
+```
+
+
+```{r plot_end_profits}
+plot(end_profits, type='l',xaxt = 'n')
+axis(1,at=1:11,labels = 5:15)
+```
+
+## Another Strategy: Option to sell no coach tickets
+
+```{r iteration_120, include=TRUE}
+T_coach = 120
+
+# Initialize sequences
+t_coach_Values = seq(0,T_coach) # all possible number of coach tickets left
+t_first_Values = seq(0,T_first) # all possible number of first class tickets left
+tValues = seq(0,T) # all possible days until takeoff
+
+t_coach_N=length(t_coach_Values) # count possible coach state values
+t_first_N=length(t_first_Values) # count possible first class state values
+tN=length(tValues)
+
+V=array(0,c(t_coach_N,t_first_N,tN)) # initialize value function 3d array
+
+
+V[,,tN]=0
+# calculating the terminal expected value (cost)
+for(seats.left.first in 0:T_first){
+  for(seats.left.coach in 0:T_coach){
+    this.cost = 0
+    for(show.up.first in 0:(T_first - seats.left.first)){
+      for(show.up.coach in 0:(T_coach - seats.left.coach)){
+        prob_first = dbinom(show.up.first,T_first - seats.left.first,p_show_first)
+        prob_coach = dbinom(show.up.coach,T_coach - seats.left.coach,p_show_coach)
+        
+        overbooked_coach = max(0,show.up.coach - M_coach)
+        extra_seats_in_first = M_first - show.up.first
+        coach_to_first = min(overbooked_coach, extra_seats_in_first)
+        coach_off_plane = max(0,overbooked_coach - coach_to_first)
+    
+        cost = c_1*coach_to_first + c_2*coach_off_plane
+        
+        this.cost = this.cost + prob_coach*prob_first*cost
+      }
+    }
+    V[seats.left.coach+1,seats.left.first+1,tN] = -1*this.cost
+  }
+}
+
+
+# Initialize sequences
+U_coach = V # initialize optimal choice variable for coach
+U_first = V # initialize optimal choice variable for first class
+
+U_coach[,,tN] = 0 # 0 is the value for no tickets for sale
+U_first[,,tN] = 0 # 0 is the value for no tickets for sale
+
+# Dynamic Programming Backwards Loop Through Time 
+for (t in (tN-1):1){
+  for (s_first in 1:t_first_N){
+    for (s_coach in 1:t_coach_N){
+      if(s_coach==1 && s_first==1){
+        V[s_coach,s_first,t]= 0 + delta*V[s_coach,s_first,t+1] # i - this references the terminal condition
+        U_first[s_coach,s_first,t]=0 # no first class tickets for sale
+        U_coach[s_coach,s_first,t]=0 # no coach tickets for sale
+      }else if(s_coach==1 && s_first!=1){
+        # can only sell first class
+        valueL_first = (priceL_first)*pL_first[2] + 
+                        delta* (pL_first[1]*V[s_coach,s_first,t+1] + 
+                                  pL_first[2]*V[s_coach,s_first-1,t+1])
+        valueH_first = (priceH_first)*pH_first[2] + 
+                        delta* (pH_first[1]*V[s_coach,s_first,t+1] + 
+                                  pH_first[2]*V[s_coach,s_first-1,t+1]) 
+        
+        V[s_coach,s_first,t]=max(c(valueL_first,valueH_first)) # value function maximizes expected revenue
+        U_coach[s_coach,s_first,t]=0
+        U_first[s_coach,s_first,t]=which.max(c(valueL_first,valueH_first)) # choice of price: 1 means low price, 2 means high price
+      }else if(s_coach!=1 && s_first==1){
+        # can only sell coach 
+        valueN_coach = (priceL_coach)*0 + 
+                        delta* (1*V[s_coach,s_first,t+1] + 
+                                  0*V[s_coach-1,s_first,t+1])
+        
+        valueL_coach = (priceL_coach)*pL_coach[2] + 
+                        delta* (pL_coach[1]*V[s_coach,s_first,t+1] + 
+                                  pL_coach[2]*V[s_coach-1,s_first,t+1])
+        
+        valueH_coach = (priceH_coach)*pH_coach[2] + 
+                        delta* (pH_coach[1]*V[s_coach,s_first,t+1] + 
+                                  pH_coach[2]*V[s_coach-1,s_first,t+1]) 
+        
+        V[s_coach,s_first,t]=max(c(valueL_coach,valueH_coach, valueN_coach)) # value function maximizes expected revenue
+        U_coach[s_coach,s_first,t]=which.max(c(valueL_coach,valueH_coach, valueN_coach)) # choice of price: 1 means low price, 2 means high price
+        
+        if(which.max(c(valueL_coach,valueH_coach, valueN_coach))==3){
+          U_coach[s_coach,s_first,t]= 0 # don't sell any coach here
+        }
+      
+        U_first[s_coach,s_first,t]=0 
+        
+      }else{
+        # Expected Values at Time t 
+        value_t_LcLf = (priceL_coach+priceL_first)*pL_coach[2]*pL_first[2]+ #sell both coach and FC
+                  (priceL_coach)*pL_coach[2]*pL_first[1]+ #sell only coach
+                  (priceL_first)*pL_coach[1]*pL_first[2]+ #sell only first
+                  0*pL_coach[1]*pL_first[1]
+        
+        value_t_LcHf = (priceL_coach+priceH_first)*pL_coach[2]*pH_first[2]+ #sell both coach and FC
+          (priceL_coach)*pL_coach[2]*pH_first[1]+ #sell only coach
+          (priceH_first)*pL_coach[1]*pH_first[2]+ #sell only first
+          0*pL_coach[1]*pH_first[1]
+        
+        value_t_HcLf = (priceH_coach+priceL_first)*pH_coach[2]*pL_first[2]+ #sell both coach and FC
+          (priceH_coach)*pH_coach[2]*pL_first[1]+ #sell only coach
+          (priceL_first)*pH_coach[1]*pL_first[2]+ #sell only first
+          0*pH_coach[1]*pL_first[1]
+        
+        value_t_HcHf = (priceH_coach+priceH_first)*pH_coach[2]*pH_first[2]+ #sell both coach and FC
+          (priceH_coach)*pH_coach[2]*pH_first[1]+ #sell only coach
+          (priceH_first)*pH_coach[1]*pH_first[2]+ #sell only first
+          0*pH_coach[1]*pH_first[1]
+        
+        value_t_NcLf = (priceH_coach+priceL_first)*0*pL_first[2]+ #sell none
+          (priceH_coach)*0*pL_first[1]+ #sell none
+          (priceL_first)*1*pL_first[2]+ #sell only first
+          0*1*pL_first[1] #sell none
+        
+        value_t_NcHf = (priceH_coach+priceH_first)*0*pH_first[2]+ #sell none
+          (priceH_coach)*0*pH_first[1]+ # sell none
+          (priceH_first)*1*pH_first[2]+ #sell only first
+          0*1*pH_first[1] # sell none
+
+        # value if you set both prices low
+        # expected revenue from low + low price + discounted expected value function next time
+        value_LcLf = value_t_LcLf + delta*(pL_coach[2]*pL_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                         pL_coach[2]*pL_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                         pL_coach[1]*pL_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                         pL_coach[1]*pL_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        # value if you set coach Low and first class High
+        # expected revenue from low + low price + discounted expected value function next time
+        value_LcHf = value_t_LcHf + delta*(pL_coach[2]*pH_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                   pL_coach[2]*pH_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                   pL_coach[1]*pH_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                   pL_coach[1]*pH_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        # value if you set coach High and first class Low
+        # expected revenue from low + low price + discounted expected value function next time
+        value_HcLf = value_t_HcLf + delta*(pH_coach[2]*pL_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                   pH_coach[2]*pL_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                   pH_coach[1]*pL_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                   pH_coach[1]*pL_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        # value if you set both prices High
+        # expected revenue from low + low price + discounted expected value function next time
+        value_HcHf = value_t_HcHf + delta*(pH_coach[2]*pH_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                   pH_coach[2]*pH_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                   pH_coach[1]*pH_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                   pH_coach[1]*pH_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        # value if you force Coach Demand = 0 and first class Low
+        value_NcLf = value_t_NcLf
+        + delta*(0*pL_first[2]*V[s_coach-1,s_first-1,t+1] + #sell none
+                   0*pL_first[1]*V[s_coach-1,s_first,t+1] + #sell none
+                   1*pL_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                   1*pL_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        # value if you force Coach Demand = 0 and first class High
+        value_NcHf = value_t_NcHf
+        + delta*(0*pH_first[2]*V[s_coach-1,s_first-1,t+1] + #sell none
+                   0*pH_first[1]*V[s_coach-1,s_first,t+1] + #sell none
+                   1*pH_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                   1*pH_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        
+        V[s_coach,s_first,t]=max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf, value_NcLf, value_NcHf)) # value function maximizes expected revenue
+
+        
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf, value_NcLf, value_NcHf))==1){
+          U_coach[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+        }
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf, value_NcLf, value_NcHf))==2){
+          U_coach[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+        }
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf, value_NcLf, value_NcHf))==3){
+          U_coach[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+        }
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf, value_NcLf, value_NcHf))==4){
+          U_coach[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+        }
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf, value_NcLf, value_NcHf))==5){
+          U_coach[s_coach,s_first,t]=0
+          U_first[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+        }
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf, value_NcLf, value_NcHf))==6){
+          U_coach[s_coach,s_first,t]=0
+          U_first[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+        }
+      }
+    }
+  }
+}
+        
+```
+
+
+```{r temp2}
+print(paste0('profit: ',V[121,21,1]))
+```
+
+Once we ran the dynamic program, we had to loop **forward** through time to calculate the expected discounted profit. 
+
+```{r loop_forward, include=TRUE}
+##########################################
+# sample path of ticket sales and revenue#
+##########################################
+n_iter = 500
+saved.profits.strategy2 = matrix(NA,n_iter,1)
+saved.cost.strategy2 = matrix(NA,n_iter,1)
+saved.coach.overbooks.strategy2 = matrix(NA,n_iter,1)
+for (p in 1:n_iter){
+s_coach = T_coach
+s_first = T_first # on the first day all seats are available
+total.rev = 0 # we haven't made any money yet
+seats.left.coach = rep(0,tN-1)  # store how many seats
+seats.left.first = rep(0,tN-1)
+profit.vec = rep(0,tN-1)
+price.vec.coach = rep(0,tN-1)
+price.vec.first = rep(0,tN-1)
+for(t in 0:(tN-1)){ # loop forward in time...don't need last time period since we can't sell anything then
+  opt.price.coach = U_coach[s_coach+1,s_first+1,t+1]
+  if(opt.price.coach == 1){ # low price
+    prob.sale.coach = pL_coach[2] # for each value of U find probability of making a sale
+    actual.price.coach = priceL_coach # for each value find actual sale price
+  }else if(opt.price.coach == 2){ # high price
+    prob.sale.coach = pH_coach[2]
+    actual.price.coach = priceH_coach
+  }else{ # no tickets for sale
+    prob.sale.coach = 0
+    actual.price.coach = 0
+  }
+  sale_coach = (runif(1)<prob.sale.coach) # simulate whether a sale was made or not
+  # when the flight is full the probability of sale is 0, we'll never get a sale
+  s_coach = s_coach - sale_coach # subtract whether or not a sale was made
+  opt.price.first = U_first[s_coach+1,s_first+1,t+1] # how much should we charge
+  if(opt.price.first == 0){
+    prob.sale.first = 0
+    actual.price.first = 0
+  }else if (opt.price.first == 1){ # low price
+    prob.sale.first = pL_first[2] # for each value of U find probability of making a sale
+    actual.price.first = priceL_first # for each value find actual sale price
+  }else{ # high price
+    prob.sale.first = pH_first[2]
+    actual.price.first = priceH_first
+  }#else{ # no tickets for sale
+    #prob.sale.first = 0
+    #actual.price.first = 0
+  #}
+  sale_first = (runif(1)<prob.sale.first) # simulate whether a sale was made or not
+  # when the flight is full the probability of sale is 0, we'll never get a sale
+  s_first = s_first - sale_first # subtract whether or not a sale was made
+  total.rev = total.rev + sale_coach*actual.price.coach*delta^(t) + sale_first*actual.price.first*delta^(t) # add discounted revenue
+  profit = total.rev
+  # save the results
+  seats.left.coach[t+1] = s_coach
+  seats.left.first[t+1] = s_first
+  profit.vec[t+1] = profit
+  price.vec.coach[t+1] = opt.price.coach
+  price.vec.first[t+1] = opt.price.first
+}
+profit.vec[tN+1] = profit.vec[tN] + V[seats.left.coach[tN-1]+1,seats.left.first[tN-1]+1,tN]
+# storing profits
+saved.profits.strategy2[p,] = profit.vec[tN]
+saved.cost.strategy2[p,] = profit.vec[tN+1] - profit.vec[tN]
+saved.coach.overbooks.strategy2[p,] = max(0,T_coach - M_coach - s_coach)
+}
+
+hist(saved.cost.strategy2)
+```
+We can compare this to the optimal solution from above. 
+
+
+## Re-solve method one with optimal solution
+
+
+```{r calc_terminal_cost, include=TRUE}
+# Initialize sequences
+
+T_coach = which.max(end_profits)+4+ M_coach
+  
+t_coach_Values = seq(0,T_coach) # all possible number of coach tickets left
+t_first_Values = seq(0,T_first) # all possible number of first class tickets left
+tValues = seq(0,T) # all possible days until takeoff
+
+t_coach_N=length(t_coach_Values) # count possible coach state values
+t_first_N=length(t_first_Values) # count possible first class state values
+tN=length(tValues)
+
+V=array(0,c(t_coach_N,t_first_N,tN)) # initialize value function 3d array
+
+
+V[,,tN]=0
+# calculating the terminal expected value (cost)
+for(seats.left.first in 0:T_first){
+  for(seats.left.coach in 0:T_coach){
+    this.cost = 0
+    for(show.up.first in 0:(T_first - seats.left.first)){
+      for(show.up.coach in 0:(T_coach - seats.left.coach)){
+        prob_first = dbinom(show.up.first,T_first - seats.left.first,p_show_first)
+        prob_coach = dbinom(show.up.coach,T_coach - seats.left.coach,p_show_coach)
+        
+        overbooked_coach = max(0,show.up.coach - M_coach)
+        extra_seats_in_first = M_first - show.up.first
+        coach_to_first = min(overbooked_coach, extra_seats_in_first)
+        coach_off_plane = max(0,overbooked_coach - coach_to_first)
+    
+        cost = c_1*coach_to_first + c_2*coach_off_plane
+        
+        this.cost = this.cost + prob_coach*prob_first*cost
+      }
+    }
+    V[seats.left.coach+1,seats.left.first+1,tN] = -1*this.cost
+  }
+}
+
+# Initialize sequences
+U_coach = V # initialize optimal choice variable for coach
+U_first = V # initialize optimal choice variable for first class
+
+U_coach[,,tN] = 0 # 0 is the value for no tickets for sale
+U_first[,,tN] = 0 # 0 is the value for no tickets for sale
+
+# Dynamic Programming Backwards Loop Through Time 
+for (t in (tN-1):1){
+  for (s_first in 1:t_first_N){
+    for (s_coach in 1:t_coach_N){
+      if(s_coach==1 && s_first==1){
+        V[s_coach,s_first,t]= 0 + delta*V[s_coach,s_first,t+1] # i - this references the terminal condition
+        U_first[s_coach,s_first,t]=0 # no first class tickets for sale
+        U_coach[s_coach,s_first,t]=0 # no coach tickets for sale
+      }else if(s_coach==1 && s_first!=1){
+        # can only sell first class
+        valueL_first = (priceL_first)*pL_first[2] + 
+                        delta* (pL_first[1]*V[s_coach,s_first,t+1] + 
+                                  pL_first[2]*V[s_coach,s_first-1,t+1])
+        valueH_first = (priceH_first)*pH_first[2] + 
+                        delta* (pH_first[1]*V[s_coach,s_first,t+1] + 
+                                  pH_first[2]*V[s_coach,s_first-1,t+1]) 
+        
+        V[s_coach,s_first,t]=max(c(valueL_first,valueH_first)) # value function maximizes expected revenue
+        U_coach[s_coach,s_first,t]=0
+        U_first[s_coach,s_first,t]=which.max(c(valueL_first,valueH_first)) # choice of price: 1 means low price, 2 means high price
+      }else if(s_coach!=1 && s_first==1){
+        # can only sell coach 
+        valueL_coach = (priceL_coach)*pL_coach[2] + 
+                        delta* (pL_coach[1]*V[s_coach,s_first,t+1] + 
+                                  pL_coach[2]*V[s_coach-1,s_first,t+1])
+        valueH_coach = (priceH_coach)*pH_coach[2] + 
+                        delta* (pH_coach[1]*V[s_coach,s_first,t+1] + 
+                                  pH_coach[2]*V[s_coach-1,s_first,t+1]) 
+        
+        V[s_coach,s_first,t]=max(c(valueL_coach,valueH_coach)) # value function maximizes expected revenue
+        U_coach[s_coach,s_first,t]=which.max(c(valueL_coach,valueH_coach)) # choice of price: 1 means low price, 2 means high price
+        U_first[s_coach,s_first,t]=0 
+      }else{
+        # Expected Values at Time t 
+        value_t_LcLf = (priceL_coach+priceL_first)*pL_coach[2]*pL_first[2]+ #sell both coach and FC
+                  (priceL_coach)*pL_coach[2]*pL_first[1]+ #sell only coach
+                  (priceL_first)*pL_coach[1]*pL_first[2]+ #sell only first
+                  0*pL_coach[1]*pL_first[1]
+        
+        value_t_LcHf = (priceL_coach+priceH_first)*pL_coach[2]*pH_first[2]+ #sell both coach and FC
+          (priceL_coach)*pL_coach[2]*pH_first[1]+ #sell only coach
+          (priceH_first)*pL_coach[1]*pH_first[2]+ #sell only first
+          0*pL_coach[1]*pH_first[1]
+        
+        value_t_HcLf = (priceH_coach+priceL_first)*pH_coach[2]*pL_first[2]+ #sell both coach and FC
+          (priceH_coach)*pH_coach[2]*pL_first[1]+ #sell only coach
+          (priceL_first)*pH_coach[1]*pL_first[2]+ #sell only first
+          0*pH_coach[1]*pL_first[1]
+        
+        value_t_HcHf = (priceH_coach+priceH_first)*pH_coach[2]*pH_first[2]+ #sell both coach and FC
+          (priceH_coach)*pH_coach[2]*pH_first[1]+ #sell only coach
+          (priceH_first)*pH_coach[1]*pH_first[2]+ #sell only first
+          0*pH_coach[1]*pH_first[1]
+
+        # value if you set both prices low
+        # expected revenue from low + low price + discounted expected value function next time
+        value_LcLf = value_t_LcLf + delta*(pL_coach[2]*pL_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                         pL_coach[2]*pL_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                         pL_coach[1]*pL_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                         pL_coach[1]*pL_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        # value if you set coach Low and first class High
+        # expected revenue from low + low price + discounted expected value function next time
+        value_LcHf = value_t_LcHf + delta*(pL_coach[2]*pH_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                   pL_coach[2]*pH_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                   pL_coach[1]*pH_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                   pL_coach[1]*pH_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        # value if you set coach High and first class Low
+        # expected revenue from low + low price + discounted expected value function next time
+        value_HcLf = value_t_HcLf + delta*(pH_coach[2]*pL_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                   pH_coach[2]*pL_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                   pH_coach[1]*pL_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                   pH_coach[1]*pL_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        # value if you set both prices High
+        # expected revenue from low + low price + discounted expected value function next time
+        value_HcHf = value_t_HcHf + delta*(pH_coach[2]*pH_first[2]*V[s_coach-1,s_first-1,t+1] + #sell both
+                   pH_coach[2]*pH_first[1]*V[s_coach-1,s_first,t+1] + #sell only coach
+                   pH_coach[1]*pH_first[2]*V[s_coach,s_first-1,t+1] + #sell only first class
+                   pH_coach[1]*pH_first[1]*V[s_coach,s_first,t+1]) #sell none
+        
+        V[s_coach,s_first,t]=max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf)) # value function maximizes expected revenue
+
+        
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf))==1){
+          U_coach[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+        }
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf))==2){
+          U_coach[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+        }
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf))==3){
+          U_coach[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=1 # choice of price: 1 means low price, 2 means high price
+        }
+        if(which.max(c(value_LcLf,value_LcHf,value_HcLf,value_HcHf))==4){
+          U_coach[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+          U_first[s_coach,s_first,t]=2 # choice of price: 1 means low price, 2 means high price
+        }
+      }
+    }
+  }
+}
+```
+
+
+```{r loop_forward, include=TRUE}
+#re-solving sample path with strategy 1 solution
+n_iter = 500
+saved.profits.strategy1 = matrix(NA,n_iter,1)
+saved.cost.strategy1 = matrix(NA,n_iter,1)
+saved.coach.overbooks.strategy1 = matrix(NA,n_iter,1)
+for (p in 1:n_iter){
+s_coach = T_coach
+s_first = T_first # on the first day all seats are available
+total.rev = 0 # we haven't made any money yet
+seats.left.coach = rep(0,tN-1)  # store how many seats
+seats.left.first = rep(0,tN-1)
+profit.vec = rep(0,tN-1)
+price.vec.coach = rep(0,tN-1)
+price.vec.first = rep(0,tN-1)
+for(t in 0:(tN-1)){ # loop forward in time...don't need last time period since we can't sell anything then
+  opt.price.coach = U_coach[s_coach+1,s_first+1,t+1]
+  if(opt.price.coach == 1){ # low price
+    prob.sale.coach = pL_coach[2] # for each value of U find probability of making a sale
+    actual.price.coach = priceL_coach # for each value find actual sale price
+  }else if(opt.price.coach == 2){ # high price
+    prob.sale.coach = pH_coach[2]
+    actual.price.coach = priceH_coach
+  }else{ # no tickets for sale
+    prob.sale.coach = 0
+    actual.price.coach = 0
+  }
+  sale_coach = (runif(1)<prob.sale.coach) # simulate whether a sale was made or not
+  # when the flight is full the probability of sale is 0, we'll never get a sale
+  s_coach = s_coach - sale_coach # subtract whether or not a sale was made
+  opt.price.first = U_first[s_coach+1,s_first+1,t+1] # how much should we charge
+  if(opt.price.first == 0){
+    prob.sale.first = 0
+    actual.price.first = 0
+  }else if (opt.price.first == 1){ # low price
+    prob.sale.first = pL_first[2] # for each value of U find probability of making a sale
+    actual.price.first = priceL_first # for each value find actual sale price
+  }else{ # high price
+    prob.sale.first = pH_first[2]
+    actual.price.first = priceH_first
+  }#else{ # no tickets for sale
+    #prob.sale.first = 0
+    #actual.price.first = 0
+  #}
+  sale_first = (runif(1)<prob.sale.first) # simulate whether a sale was made or not
+  # when the flight is full the probability of sale is 0, we'll never get a sale
+  s_first = s_first - sale_first # subtract whether or not a sale was made
+  total.rev = total.rev + sale_coach*actual.price.coach*delta^(t) + sale_first*actual.price.first*delta^(t) # add discounted revenue
+  profit = total.rev
+  # save the results
+  seats.left.coach[t+1] = s_coach
+  seats.left.first[t+1] = s_first
+  profit.vec[t+1] = profit
+  price.vec.coach[t+1] = opt.price.coach
+  price.vec.first[t+1] = opt.price.first
+}
+profit.vec[tN+1] = profit.vec[tN] + V[seats.left.coach[tN-1]+1,seats.left.first[tN-1]+1,tN]
+# storing profits
+saved.profits.strategy1[p,] = profit.vec[tN]
+saved.cost.strategy1[p,] = profit.vec[tN+1] - profit.vec[tN]
+saved.coach.overbooks.strategy1[p,] = max(0,T_coach - M_coach - s_coach)
+}
+
+
+```
+
+
+```{r loop_forward, include=TRUE}
+strat1 <- data.frame(saved.profits.strategy1,saved.cost.strategy1,saved.coach.overbooks.strategy1)
+colnames(strat1) <- c('profit','cost','overbookings')
+strat1$e <- 'strategy 1'
+strat2 <- data.frame(saved.profits.strategy2,saved.cost.strategy2,saved.coach.overbooks.strategy2)
+colnames(strat2) <- c('profit','cost','overbookings')
+strat2$e <- 'strategy 2'
+
+combo <- rbind(strat1, strat2)
+
+ggplot(combo, aes(profit, fill = e)) + geom_density(alpha = 0.2)+labs(title="Profit")
+ggplot(combo, aes(overbookings, fill = e)) + geom_density(alpha = 0.2)+labs(title="Overbookings")
+ggplot(combo, aes(cost, fill = e)) + geom_density(alpha = 0.2)+labs(title="Cost")
+
+
+```
+
+
+```{r plot1, echo=FALSE}
+# par(mfrow=c(2,2))
+# 
+# plot(price.vec.coach, main="Coach Pricing over time")
+# plot(price.vec.first, main="First Class Pricing over time")
+# 
+# #coach plot - seats left
+# plot(tValues[1:(tN-1)],seats.left.coach,xlab='Time',ylab='Seats Left',type='l', main = "Seats Left in Coach over time")
+# #first plot - seats left
+# plot(tValues[1:(tN-1)],seats.left.first,xlab='Time',ylab='Seats Left',type='l', main="Seats Left in First Class over time")
+# 
+# par(mfrow=c(1,1))
+# 
+# #profit plot
+# plot(tValues[1:(tN)],profit.vec,xlab='Time',ylab = 'Discounted Revenue',type='l', main="Profit over Time")
+```
+
+
+The expected discounted profit of selling these tickets and paying out overbooking costs over the course of the year is `r usd(profit.vec[length(profit.vec)])`.
+
+### How often is coach overbooked?
+With the option to sell zero coach tickets under the new strategy, coach is overbooked more often than in the first strategy. In strategy 1, coach is overbooked on average by about 9 seats (total 109), and in strategy 2, coach is overbooked on average by about 20 seats (total 120). The graph below titled "Overbookings" displays the distribution of overbooked seats between both strategies.
+
+### Average overbooking cost
+The average overbooking cost of this new strategy is 4,571, which is higher than the average overbooking cost of the original strategy of 950. The graph below titled "Cost" shows the distribution of overbooking costs between both strategies. Although the cost is higher for strategy 2, the profits are also higher, which implies less people get "kicked off" with this strategy. 
+
+### Volatility of discounted profits
+The average profit of strategy 2 is 40,839 with a standard deviation of 703. Strategy 1 has an average profit of 42,387 with a standard deviation of 637. Strategy 2 is thus more volatile, which is also evident in the wider spread in the graph below titled "Profits".
+
+It is important to note that the optimal strategy has switched from solving backwards to solving forwards. After solving forward in the last code block, the ideal strategy appears to be strategy 1. 
+
+
+----------------------------------------------------------------------------------------------
+Report to boss:
+
+If we do have the option to overbook the plane by 5 seats, the optimal number of seats to sell would be 105 in coach and 20 in first. This would result in an expected discounted profit of $42,242.86.
+If we have the option to overbook by a greater amount, the optimal number of seats to sell would be 109, which gives us an expected discounted profit of $42,496.11. As you can see in the “End_Profits” graph, the profits increase sharply after selling 105 seats up to 109, and then the profits begin to decrease because the cost of overbooking begins to exceed the marginal revenue. 
+However, if we allow ourselves to sell 0 coach tickets on any given day, this increases our profit more to $44,971.97 by selling 120 coach seats and 20 first class seats.  
+When we loop forward, the average profit for strategy 1 is now higher than strategy 2 at 42,387 compared to 40,839. 
+
+We would recommend strategy 2 with the option of selling 0 coach tickets. Although when we looped forward it appears that strategy 1 gives better results, the random simulation that occurs each day leaves much of the results up to chance. For instance, each day there is a 65% chance of a 300 dollar ticket being bought. 
+By implementing strategy 2, we expect to overbook more seats and reap higher profits. This can be attributed to the value of the flexibility now existent in our day-to-day selling processes. More flexibility is a great benefit when balancing between demand at the point of sale and the day of the flight. 
+
+
+
+
